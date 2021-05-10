@@ -1,0 +1,422 @@
+---
+title: "Atlantis biomass distributions with sdmTMB - lat, lon, depth"
+author: "Alberto Rovellini"
+date: "5/10/2021"
+output:
+  html_document:
+    code_folding: hide
+    toc: true
+    toc_float: true
+---
+
+__This document is based on Gemma's code.__
+
+This is a template for fitting sdmTMB to GOA bottom trawl data. For each species, it fits sdmTMB to life stages (juveniles or adults) to predict CPUE in number of individuals per km$^{2}$. This predicted CPUE is then scaled up to box area in Atlantis, to get numbers of individuals per box and proportion of the total, which is what we need to initialise Atlantis. This does not include British Columbia. 
+
+This workflow is based on the following assumptions:
+
+1. We use lat, lon and depth as predictors. We do not use environmental covariates as predictors because we are not attempting to explain why fish species are distributed the way they are, but rather we are trying to have sensible generic distributions over the model domain throughout the study period.
+2. We predict over a regular grid. The size of this grid is 10 km at the moment for computational efficiency, but this is arbitrary and we may need to test different grid sizes and see how the results change. After some testing with predicting over a grid of 1 point per Atlantis box, I chose to use a regular grid because: (1) an average value of lat and lon, such as a centroid, is difficult to calculate for some of the boxes with crescent shapes; and (2) some boxes are placed over areas where depth changes greatly (the GOA bathymetry is complex), and the inside points may fall inside or near a deeper/shallower area withih a certain box. While the Atlantis box itself has a constant depth, the nearest node of the SPDE mesh may have been near such deeper/shallower area, thus skewing the estimate of the biomass index for that particular box.
+3. We are not so interested in accurate predictions for any one year, but rather in representative means of where the fish has been over the last few decades. Two options: we can run the model without year effects (i.e. lump all data), or we can run the model with year effects and then take an average of the period we decide to use. At the moment this code runs a temporal model and takes averages of the estimates at the end, but arguments could be made for the other option too.
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r, message = FALSE, include = FALSE}
+library(tidyverse)
+library(sdmTMB)
+library(sf)
+library(rbgm)
+library(viridis)
+library(kableExtra)
+```
+
+```{r}
+select <- dplyr::select
+```
+
+# Read data
+```{r}
+load("data/cpue.atf.A.Rdata")
+race_data <- as_tibble(dat_stage)
+```
+
+This is RACE data from AKFIN. There are a lot of fields, so let's select what we need and drop the rest.
+Note: for lat and lon, for now I am using the start values for each tow, but it would be easy to get the coordinates for the midpoint of the tow.
+```{r}
+fields <- c("YEAR",
+            "HAULJOIN",
+            "LAT", 
+            "LON", 
+            "DEPTHR", 
+            "SST", 
+            "TEMPR", 
+            "SPECIES_CODE", 
+            "CN",
+            "BIOM_KGKM2", 
+            "NUM_KM2",
+            "STAGE")
+  
+race_data <- race_data %>% select(all_of(fields)) %>% set_names(c(
+  "year",
+  "hauljoin",
+  "lat",
+  "lon",
+  "depth",
+  "stemp",
+  "btemp",
+  "species_code",
+  "name",
+  "biom_kgkm2",
+  "num_km2",
+  "stage"))
+```
+
+Take a quick look at the data spatially.
+```{r, fig.width = 12, fig.height = 18}
+# coast for plotting
+load("data/goa_coast.Rdata")
+coast_sf <- st_as_sf(coast) # turn coast to sf
+
+ggplot()+
+  geom_point(data = race_data, aes(lon, lat, colour = log1p(num_km2)), size = 1.5)+
+  scale_colour_viridis_c()+
+  geom_polygon(data = coast, aes(x = long, y = lat, group = group), colour = "black", fill = "grey80")+
+  theme_minimal()+
+  facet_wrap(~year, ncol = 2)+
+  labs(title = paste(race_data$name,"CPUE from GOA bottom trawl survey - stage:", race_data$stage, sep = " "))
+```
+
+Take a quick look at time series of total numbers CPUE from raw data
+```{r, fig.width = 6, fig.height = 4}
+num_year <- race_data %>% group_by(year) %>% summarise(num = sum(log1p(num_km2)))
+
+ggplot(num_year, aes(year, log(num)))+
+  geom_point()+
+  geom_path()+
+  theme_minimal()+
+  labs(title = paste(race_data$name,"total GOA CPUE from bottom \n trawl survey - stage:", race_data$stage, sep = " "))
+
+```
+The above is across the entire GOA. 
+
+# Add zeroes
+
+Kirstin's CPUE data includes empty hauls (i.e. zero catches). However, in the step where aggregate the size bin data into life-stage data (not included in this script), we loose those empty hauls (as BIN will be NA for a haul whith zero catch in Kirstin's data set, which causes zero cathces to be dropped when I join by HAULJOIN). So, we need to add them back to the RACE data here. To do this, I take haul information from the "Haul Descriptions" data set on AKFIN. I then subtract the RACE hauls with catch in race_data from the "Haul Descriptions" list to see which hauls were empty for this particular species / life stage. Then pad these empty hauls with zero CPUEs, and attach them to race_data.
+```{r}
+load("data/hauls.Rdata") # as accessible on AKFIN Answers with no further modifications
+
+data_hauls <- levels(factor(race_data$hauljoin))
+zero_hauls <- setdiff(levels(factor(hauls$Haul.Join.ID)), data_hauls) # assuming that if there are no records from a haul, the catch in that haul was 0 for this species
+
+# make a data frame to bind by row
+zero_catches <- hauls %>% filter(Haul.Join.ID %in% zero_hauls) %>% 
+  select(Year, Haul.Join.ID, Ending.Latitude..dd., Ending.Longitude..dd., Bottom.Depth..m., Surface.Temperature..C., Gear.Temperature..C.) %>% 
+  mutate(species_code = rep(NA, length(Year)),
+         name = rep(NA, length(Year)),
+         biom_kgkm2 = rep(0, length(Year)),
+         num_km2 = rep(0, length(Year)),
+         stage = rep(NA, length(Year))) %>%
+  set_names(names(race_data))
+
+# attach by row to race_data
+race_data <- rbind(race_data, zero_catches)
+# ditch hauls with empty lat lon
+race_data <- race_data %>% filter(!is.na(lat) & !is.na(lon))
+# and with NA depths
+race_data <- race_data %>% filter(!is.na(depth))
+```
+
+# sdmTMB
+
+## Create spatial mesh
+
+This is the mesh that the sdmTMB algorithm uses to estimate spatial autocorrelation. The speed of model running is highly dependent on number of knots. 100 is quite low, you'd want to make sure it was robust by checking multiple resolutions when you have a model you want to actually use (people use like 350-450 or something).
+
+**Note:** SPDE = Stochastic Partial Differential Equations approach. Some material can be found [here](https://becarioprecario.bitbucket.io/spde-gitbook/ch-intro.html#sec:spde), but basically it is a way of calculating the position of the mesh knots. 
+```{r}
+race_spde <- make_mesh(race_data, c("lon", "lat"), n_knots = 100) # usually 450
+plot(race_spde)
+```
+
+Check out the distribution of the biomass density response variable.
+```{r, fig.width = 6, fig.height = 4}
+hist(race_data$num_km2, breaks = 30)
+```
+
+```{r, fig.width = 6, fig.height = 4}
+hist(log1p(race_data$num_km2), breaks = 30)
+```
+
+Proportion of zeroes in percentage.
+```{r}
+length(which(race_data$num_km2 == 0))/nrow(race_data)*100
+```
+
+## Space, time, and depth model.
+
+Try running a model with smooth term for depth. Using 5 knots for the smooth - but this is arbitrary and I should test a range of values and compare. As a note, I am not scaling depth here. The reason is that depth has a different range in the data and the prediction grid, and scaled values have different meaning.
+
+**Question for Gemma:** Have you ever used convergence metrics produced by the sdmTMB() function to evaluate model fit? Calling m_depth\$model provides some information on convergence and iterations of the optimization process, but I confess I am not familiar with these, especially in this particular package. My understanding is that sdmTMB() uses the nlminb() optimization routine, and going off of some hints [here](https://stackoverflow.com/questions/41071857/nls-convergence-message-in-r) and [here](https://stackoverflow.com/questions/9185221/convergence-error-codes-in-nlminb-where-stored) I am guessing that a simple check that m_depth\$model\$convergence = 0 and m_depth\$model\$message = 3,4,5,6 could be a start. I will do more reading, I was just wondering whether you look at this at all or not.
+```{r, include = FALSE}
+start.time <- Sys.time()
+m_depth <- sdmTMB(
+  data = race_data, 
+  formula = num_km2 ~ 0 + s(depth, k = 5) + as.factor(year), # predicting numbers - we will need numbers for Atlantis
+  time = "year", 
+  spde = race_spde, 
+  reml = TRUE,
+  anisotropy = FALSE,
+  spatial_trend = FALSE, 
+  spatial_only = FALSE,
+  silent = FALSE,
+  control = sdmTMBcontrol(),
+  nlminb_loops = 3,
+  newton_steps = 10,
+  family = tweedie(link = "log"))
+end.time <- Sys.time()
+time.taken_m_depth <- end.time - start.time
+time.taken_m_depth
+```
+
+Check out model residuals.
+```{r, fig.width = 6, fig.height = 4}
+race_data$resids <- residuals(m_depth) # randomized quantile residuals
+hist(race_data$resids)
+```
+
+And QQ plot.
+```{r}
+qqnorm(race_data$resids)
+abline(a = 0, b = 1)
+```
+One clear outlier?
+
+Plot the response curve from the depth smooth term.
+```{r, fig.width = 6, fig.height = 4}
+plot(m_depth$mgcv_mod, rug = TRUE)
+```
+
+Finally, plot the residuals in space. If residuals are constantly larger/smaller in some of the areas, it may be sign that the model is biased and it over/underpredicts consistently for some areas. Residuals should be randomly distributed in space. We need to read in the Atlantis BGM file to do that, as we need the right projection.
+
+Read in BGM and coast.
+```{r}
+atlantis_bgm <- read_bgm("data/GOA_WGS84_V4_final.bgm")
+```
+
+```{r, fig.width = 12, fig.height=18}
+race_sf <- race_data %>% st_as_sf(coords = c(x = "lon", y = "lat"), crs = "WGS84") %>% st_transform(crs = atlantis_bgm$extra$projection) # turn to spatial object
+
+ggplot()+
+  geom_sf(data = race_sf, aes(color = resids, alpha = .8))+
+  scale_color_viridis()+
+  geom_sf(data = coast_sf)+
+  theme_minimal()+
+  labs(title = paste(race_data$name,"model residuals in space - stage:", race_data$stage, sep = " "))+
+  facet_wrap(~year, ncol = 2)
+```
+
+# Predictions from SDM
+
+Take a grid (which must contain information on the predictors we used to build the model) and predict the biomass index over such grid based on the predictors. The grid is currently a regular grid with 10-km cell size, but 10 km might not be enough to get prediction points in all boxes - especially for a couple very small and narrow boxes at the western end of the model domain. Revisit this if necessary, but a finer mesh could be difficult to justify compared to the density of the survey data. The grid covers the entire Atlantis model domain, including the non-dynamic boundary boxes (deeper than 1000 m).
+
+Read in the Atlantis prediction grid (10 km) modified in Atlantis_grid_covars.R (code not included here).
+```{r}
+atlantis_boxes <- atlantis_bgm %>% box_sf()
+```
+
+**Important:** depth in the RACE data is a positive number. Depth in the prediction grid we obtained from the ETOPO rasters is a negative number. When we use depth as predictor for in our regular grid, make sure depth is a positive number for consistency with the model variable, or else everything will be upside-down.
+```{r}
+load("data/atlantis_grid_depth.Rdata")
+
+atlantis_grid_depth <- atlantis_grid_depth %>% mutate(depth = -depth) # making sure that depth has the same sign/orientation in the data and prediction grid
+
+# add coordinate columns
+atlantis_coords <- atlantis_grid_depth %>% st_as_sf(coords = c("x", "y"), crs = atlantis_bgm$extra$projection) %>%
+  st_transform(crs = "+proj=longlat +datum=WGS84") %>% dplyr::select(geometry)
+
+atlantis_grid <- cbind(atlantis_grid_depth, do.call(rbind, st_geometry(atlantis_coords)) %>%
+    as_tibble() %>% setNames(c("lon","lat")))
+
+paste("Positive depths are:", length(which(atlantis_grid$depth>0)), "out of:", nrow(atlantis_grid_depth), sep = " ") # Write out a check that depths are positive (few negatives are OK - they are on land - I'll fix it but it should not matter as island boxes will be boundary boxes in Atlantis)
+
+# add year column
+all_years <- levels(factor(race_data$year))
+
+atlantis_grid <- atlantis_grid[rep(1:nrow(atlantis_grid), length(all_years)),]
+atlantis_grid$year <- as.integer(rep(all_years, each = nrow(atlantis_grid_depth)))
+```
+
+Make SDM predictions onto new data from depth model. **Back-transforming here, is this sensible?**
+```{r}
+predictions_race <- predict(m_depth, newdata = atlantis_grid, return_tmb_object = TRUE)
+atlantis_grid$estimates <- exp(predictions_race$data$est) #Back-transforming here, is this sensible?
+
+atlantis_grid_sf <- atlantis_grid %>% st_as_sf(coords = c("x", "y"), crs = atlantis_bgm$extra$projection) # better for plots
+```
+
+Not plotting most of Canada because the predictions look terrible (due to not having biomass data from there in this model).
+```{r,  fig.width = 12, fig.height = 18}
+ggplot()+
+  geom_sf(data = subset(atlantis_boxes, box_id < 92), aes(fill = NULL))+
+  geom_sf(data = subset(atlantis_grid_sf, box_id < 92), aes(color=log1p(estimates)))+ # taking the log for visualisation
+  geom_sf(data = coast_sf, colour = "black", fill = "grey80")+
+  scale_color_viridis(name = expression(paste("Log(CPUE) num ", km^-2)))+
+  theme_minimal()+
+  labs(title = paste(race_data$name,"predicted CPUE - stage:", race_data$stage, sep = " "))+
+  facet_wrap(~year, ncol = 2)
+```
+
+Attribute the predictions to their respective Atlantis box, so that we can take box averages.
+```{r}
+atlantis_grid_means <- atlantis_grid %>% group_by(year, box_id) %>%
+  summarise(mean_estimates = mean(estimates), na.rm = TRUE) %>% ungroup() 
+
+# join this with the box_sf file
+
+predictions_by_box <- atlantis_boxes %>% inner_join(atlantis_grid_means, by = "box_id")
+```
+
+See estimates per box for all years. Silence boundary boxes as they throw the scale out of whack (and they do not need predictions). 
+```{r, fig.width = 12, fig.height = 18}
+predictions_by_box <- predictions_by_box %>% rowwise() %>% mutate(mean_estimates = ifelse(isTRUE(boundary), NA, mean_estimates))
+
+ggplot()+
+  geom_sf(data = predictions_by_box[predictions_by_box$box_id<92,], aes(fill = log1p(mean_estimates)))+ # taking the log for visualisation
+  scale_fill_viridis(name = expression(paste("Log(CPUE) num ", km^-2)))+
+  theme_minimal()+
+  geom_sf(data = coast_sf, colour = "black", fill = "grey80")+
+  facet_wrap(~year, ncol = 2)+
+  labs(title = paste(race_data$name, "mean predicted CPUE by Atlantis box - stage:", race_data$stage, sep = " "))
+```
+
+Plot the raw data again for comparison.
+```{r, fig.width = 12, fig.height = 18}
+ggplot()+
+  geom_point(data = race_data, aes(lon, lat, colour = log1p(num_km2)), size = 1.5, alpha = .5)+ # taking the log for visualisation
+  scale_colour_viridis_c(name = expression(paste("Log(CPUE) num ", km^-2)))+
+  geom_polygon(data = coast, aes(x = long, y = lat, group = group), colour = "black", fill = "grey80")+
+  theme_minimal()+
+  facet_wrap(~year, ncol = 2)+
+  labs(title = paste(race_data$name,"CPUE from GOA bottom trawl survey - stage:", race_data$stage, sep = " "))
+```
+
+Check also depth distributions.
+```{r, fig.width = 6, fig.height = 4}
+ggplot(data = race_data, aes(depth))+
+  geom_histogram(colour = "black", fill = 'grey80')+
+  theme_minimal()
+```
+Interpret this one with care: does it mean that the species is found more frequently at a certain depth, or that the sampling happens most frequently at a certain depth? 
+
+Plot data and predictions distributions.
+```{r, fig.width = 6, fig.height = 4}
+ggplot(data = race_data, aes(log1p(num_km2)))+
+  geom_histogram(colour = "black", fill = 'grey80')+
+  theme_minimal()
+```
+
+```{r, fig.width = 6, fig.height = 4}
+ggplot(data = predictions_by_box, aes(log1p(mean_estimates)))+
+  geom_histogram(colour = "black", fill = 'grey80')+
+  theme_minimal()
+```
+
+# Mean predictions for the study period
+
+Now calculate means of the predictions for the entire study period. Doing it by taking 1984-2019 averages for each Atlantis box.
+```{r, , fig.width = 10, fig.height = 5}
+means_all_years <- predictions_by_box %>% group_by(box_id, area, boundary) %>% summarise(all_years_numkm2 = mean(mean_estimates))
+
+ggplot()+
+  geom_sf(data = means_all_years[means_all_years$box_id < 92,], aes(fill = log1p(all_years_numkm2)))+ # log for visualisation
+  scale_fill_viridis(name = expression(paste("Log(CPUE) num ", km^-2)))+
+  geom_sf(data = coast_sf, colour = "black", fill = "grey80")+
+  theme_minimal()+
+  labs(title = paste(race_data$name, "mean predicted CPUE by Atlantis box (1984-2019) - stage:", race_data$stage, sep = " "))
+```
+
+# Model skill
+
+Trying to evaluate model skill by having a look at how well model predictions align with observations.
+
+Since this is a spatially-explicit approach, we need observations and predictions at the same location. One approach would be to look at things box-wise by looking at relationships between average CPUE from data per box and average predicted CPUE per box. While this makes sense (boxes are our unit of space in Atlantis after all), I did some testing and it does not come without issues. For example, some boxes have no data points in certain years, but have a constant number of predicted points from the regular grid every year. So, my approach at the moment is to use the locations of all RACE hauls as a prediction grid. Is this circular?  
+```{r}
+#make a prediction grid from the race data itself
+race_grid_tmp <- race_data %>% dplyr::select(lon, lat, depth)
+
+# add year
+race_grid <- race_grid_tmp[rep(1:nrow(race_grid_tmp), length(all_years)),]
+race_grid$year <- as.integer(rep(all_years, each = nrow(race_grid_tmp)))
+
+# predict on this grid
+predictions_at_locations <- predict(m_depth, newdata = race_grid, return_tmb_object = TRUE)
+race_grid$predictions <- exp(predictions_at_locations$data$est) # back-transforming here
+```
+
+Now join by year and coordinates to have predictions at the sampling points.
+```{r, fig.width = 12, fig.height = 6}
+race_corr <- race_data %>% left_join(race_grid, by = c("year", "lat", "lon"))
+```
+
+## Observed versus predicted
+
+```{r}
+paste0("Pearson's coef observations vs predictions: ", cor(race_corr$num_km2, race_corr$predictions, use = "everything", method = "pearson"))
+```
+What is a good value here?
+
+Plot.
+```{r, fig.width = 12, fig.height = 12}
+ggplot(race_corr, aes(x = log1p(predictions), y = log1p(num_km2)))+ # log for visualisation
+  geom_point(aes(color = depth.y))+
+  scale_color_viridis()+
+  geom_abline(intercept = 0, slope = 1)+
+  theme_minimal()+
+  facet_wrap(~year, scales = "free")+
+  labs(title = paste(race_data$name, "observed vs predicted CPUE. Stage: ", race_data$stage, sep = " "))
+```
+
+**Question for Gemma:** when I use the model to predict back onto the original data, the model seems to get the zeroes wrong (i.e. it predicts there to be fish where the data said there wasn't). At quick glance, this would appear to happen more (but not only) for deeper depths. Have you ever observed this, and if yes, do you have any tips on how I should be thinking about it?
+
+## Root Mean Square Error (RMSE)
+
+Calculate RMSE between predicted and observed values.
+```{r}
+paste("RMSE:", sqrt(mean(race_corr$predictions - race_corr$num_km2)^2), " num km-2", sep = " ") ### traditional rmse metric, in units num km2
+```
+
+Normalised RMSE. 
+```{r}
+rmse_cv <- sqrt(mean((race_corr$predictions - race_corr$num_km2)^2))/(max(race_corr$num_km2)-min(race_corr$num_km2))*100 #### normalised rmse, expressed as a % of the range of observed biomass values, sort of approximates a coefficient of variation 
+paste("Normalised RMSE:", paste0(rmse_cv, "%"), sep = " ")
+```
+What is a good value here?
+
+# Total numbers and numbers per box
+
+The current estimated CPUE is in num km$^{-2}$. So, just I just turn that into fish per box (biomass pools groups will follow the same workflow except the model will predict biomass CPUE). Remember that the area is in m$^2$ for the boxes, so need to divide by 1,000,000.
+```{r}
+means_all_years <- means_all_years %>% mutate(numbers = all_years_numkm2*area*1e-06)
+
+total_numbers <- sum(means_all_years$numbers, na.rm = TRUE) # get total numbers
+
+means_all_years <- means_all_years %>% mutate(proportion = numbers/total_numbers) # get proportion from each box - needs to sum to 1
+```
+Of course this is missing Canada at the moment.
+
+Plot.
+```{r, fig.width = 10, fig.height = 5}
+ggplot()+
+  geom_sf(data = means_all_years[means_all_years$box_id < 92,], aes(fill = proportion))+
+  scale_fill_viridis(name = "Box numbers as proportion \n of total numbers")+
+  geom_sf(data = coast_sf, colour = "black", fill = "grey80")+
+  theme_minimal()+
+  labs(title = paste(race_data$name, "proportion of individuals (S1-S4) by box. Stage:", race_data$stage, sep = " "))
+```
+
+```{r}
+means_all_years %>% select(box_id, all_years_numkm2, numbers, proportion) %>% st_set_geometry(NULL) %>% kable(align = 'lccc', format = "markdown", 
+      col.names = c("Box", "CPUE (num km-2)", "Number of individuals", "Proportion"))
+```
