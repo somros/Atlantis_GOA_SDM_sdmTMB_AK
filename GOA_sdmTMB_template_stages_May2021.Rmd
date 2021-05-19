@@ -397,26 +397,19 @@ What is a good value here?
 # Total numbers and numbers per box
 
 The current estimated CPUE is in num km$^{-2}$. So, just I just turn that into fish per box (biomass pools groups will follow the same workflow except the model will predict biomass CPUE). Remember that the area is in m$^2$ for the boxes, so need to divide by 1,000,000.
+
+Do this separate for Alaska and Canada, since we are using different data. Total biomass to calculate only for the respective regions, as well as box biomass. Proportional biomass (S1-S4), instead, makes sense only for the entire model domain, so that will be in another script.
 ```{r}
 means_all_years <- means_all_years %>% mutate(numbers = all_years_numkm2*area*1e-06)
 
-total_numbers <- sum(means_all_years$numbers, na.rm = TRUE) # get total numbers
+means_alaska <- means_all_years %>% filter(box_id<92)
 
-means_all_years <- means_all_years %>% mutate(proportion = numbers/total_numbers) # get proportion from each box - needs to sum to 1
-```
-Of course this is missing Canada at the moment.
-
-Plot.
-```{r, fig.width = 10, fig.height = 5}
-ggplot()+
-  geom_sf(data = means_all_years[means_all_years$box_id < 92,], aes(fill = proportion))+
-  scale_fill_viridis(name = "Box numbers as proportion \n of total numbers")+
-  geom_sf(data = coast_sf, colour = "black", fill = "grey80")+
-  theme_minimal()+
-  labs(title = paste(race_data$name, "proportion of individuals (S1-S4) by box. Stage:", race_data$stage, sep = " "))
+# total_numbers <- sum(means_all_years$numbers, na.rm = TRUE) # get total numbers
+# 
+# means_all_years <- means_all_years %>% mutate(proportion = numbers/total_numbers) # get proportion from each box - needs to sum to 1
 ```
 
 ```{r}
-means_all_years %>% select(box_id, all_years_numkm2, numbers, proportion) %>% st_set_geometry(NULL) %>% kable(align = 'lccc', format = "markdown", 
-      col.names = c("Box", "CPUE (num km-2)", "Number of individuals", "Proportion"))
+means_alaska %>% select(box_id, all_years_numkm2, numbers) %>% st_set_geometry(NULL) %>% kable(align = 'lccc', format = "markdown", 
+      col.names = c("Box", "CPUE (num km-2)", "Number of individuals"))
 ```
