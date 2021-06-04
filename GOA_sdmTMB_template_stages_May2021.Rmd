@@ -139,11 +139,13 @@ race_data <- race_data %>% filter(!is.na(depth))
 
 ## Create spatial mesh
 
-This is the mesh that the sdmTMB algorithm uses to estimate spatial autocorrelation. Using 450 knots for the atual models, since this is a large area. More than that becomes computationally demanding. Using 100 here for demonstration purposes.
+This is the mesh that the sdmTMB algorithm uses to estimate spatial autocorrelation. 
+
+Number of knots (tested on adult ATF): different numbers of knots (e.g. 300, 450, 750) return similar model fits and similar qualitative results, but the correlation of observed vs predicted increases with more knots, suggesting that the finer the SPDE mesh, the more precise the model is. Considerations here would be computation time (750 knots takes ~40 minutes to run) and overfitting. Pearson's coefficient increase by almost 0.2 from 300 to 750 knots for adult ATF. I would not get too hung up on that. On an intuitive level, a number of knots approaching the data should return a perfect fit, but would the model be useful for predictions outside the data? 
 
 **Note:** SPDE = Stochastic Partial Differential Equations approach. Some material can be found [here](https://becarioprecario.bitbucket.io/spde-gitbook/ch-intro.html#sec:spde), but basically it is a way of calculating the position of the mesh knots. 
 ```{r}
-race_spde <- make_mesh(race_data, c("lon", "lat"), n_knots = 100) # usually 450
+race_spde <- make_mesh(race_data, c("lon", "lat"), n_knots = 450) # usually 450
 plot(race_spde)
 ```
 
@@ -243,11 +245,11 @@ Read in the Atlantis prediction grid (10 km) modified in Atlantis_grid_covars.R 
 atlantis_boxes <- atlantis_bgm %>% box_sf()
 ```
 
-**Important:** depth in the RACE data is a positive number. Depth in the prediction grid we obtained from the ETOPO rasters is a negative number. When we use depth as predictor for in our regular grid, make sure depth is a positive number for consistency with the model variable, or else everything will be upside-down.
+**Important:** depth in the RACE data is a positive number. Depth in the prediction grid we obtained from the ETOPO rasters is a negative number. When we use depth as predictor for in our regular grid, make sure depth is a positive number for consistency with the model variable, or else everything will be upside-down. This was done in the script that produces the prediction grid, so depth is **positive**. 
 ```{r}
 load("data/atlantis_grid_depth.Rdata")
 
-atlantis_grid_depth <- atlantis_grid_depth %>% mutate(depth = -depth) # making sure that depth has the same sign/orientation in the data and prediction grid
+#atlantis_grid_depth <- atlantis_grid_depth %>% mutate(depth = -depth) # making sure that depth has the same sign/orientation in the data and prediction grid
 
 # add coordinate columns
 atlantis_coords <- atlantis_grid_depth %>% st_as_sf(coords = c("x", "y"), crs = atlantis_bgm$extra$projection) %>%
@@ -334,7 +336,7 @@ ggplot()+
   labs(title = paste(race_data$name,"CPUE from GOA bottom trawl survey - stage:", race_data$stage, sep = " "))
 ```
 
-Have a look at CPUE by depth. This is rough and quick, keep in mind that most tows happen below 300 m, so the sample is not equal between depths.
+Have a look at CPUE by depth. This is rough and quick, keep in mind that most tows happen shallower than 300 m, so the sample is not equal between depths.
 ```{r}
 ggplot(data = race_data, aes(x = depth, y = log1p(num_km2), color = log1p(biom_kgkm2)))+
   scale_color_viridis()+
@@ -343,16 +345,17 @@ ggplot(data = race_data, aes(x = depth, y = log1p(num_km2), color = log1p(biom_k
   labs(title = "CPUE by depth")
 ```
 
-Plot data and predictions distributions.
+Plot data and predictions distributions. These are the data.
 ```{r}
-ggplot(data = race_data, aes(log1p(num_km2)))+
-  geom_histogram(colour = "black", fill = 'grey80')+
+ggplot(data = race_data, aes(x = log1p(num_km2)))+
+  geom_histogram(colour = "black", fill = 'grey80', bins = 30)+
   theme_minimal()
 ```
 
+And these are the predictions over the 10 km grid.
 ```{r}
-ggplot(data = predictions_by_box, aes(log1p(mean_estimates)))+
-  geom_histogram(colour = "black", fill = 'grey80')+
+ggplot(data = atlantis_grid, aes(x = log1p(estimates)))+
+  geom_histogram(colour = "black", fill = 'grey80', bins = 30)+
   theme_minimal()
 ```
 
@@ -401,7 +404,7 @@ paste0("Pearson's coef observations vs predictions: ", cor(race_corr$num_km2, ra
 
 Plot.
 ```{r, fig.width = 12, fig.height = 12}
-ggplot(race_corr, aes(x = log1p(predictions), y = log1p(num_km2)))+ # log for visualisation
+ggplot(race_corr, aes(x = log1p(num_km2), y = log1p(predictions)))+ # log for visualisation
   geom_point(aes(color = depth.y))+
   scale_color_viridis()+
   geom_abline(intercept = 0, slope = 1)+
@@ -410,7 +413,34 @@ ggplot(race_corr, aes(x = log1p(predictions), y = log1p(num_km2)))+ # log for vi
   labs(title = paste(race_data$name, "observed vs predicted CPUE. Stage: ", race_data$stage, sep = " "))
 ```
 
-These models often underpredict zeroes.
+These models often underpredict zeroes, i.e. they predict a catch where there was none. Does this happen randomly in space? Does it have a correlation of some kind with depth?
+
+Plot zero catch from the data and the relative predictions. Turn to sf for plotting.
+```{r, fig.width = 12, fig.height = 18}
+race_corr %>% filter(num_km2 == 0) %>%
+  st_as_sf(coords = c(x = "lon", y = "lat"), crs = 4326) %>%
+  ggplot()+
+  geom_sf(aes(color = log1p(predictions)))+
+  geom_sf(data = coast_sf)+
+  scale_color_viridis()+
+  theme_minimal()+
+  labs(title = "Model predictions at zero-catch locations")+
+  facet_wrap(~year, ncol = 2)
+```
+For adult ATF with 450 knots and k = 5 in the depth spline, it seems that non-zero CPUE is predicted by the model at locations of zero catch all over the GOA. However, the magnitude of the CPUE values does not seem completely random in space. Smaller CPUE values are predicted in some years for zero-catch on the slope (i.e., at depth). Some of the higher values are predicted East of Kodiak. 
+
+What about the relationship between model residuals and depth?
+```{r, fig.width = 12, fig.height=16}
+race_data %>%
+  #filter(num_km2 == 0) %>%
+  ggplot()+
+  geom_point(aes(x = depth, y = resids, color = log1p(num_km2)))+
+  geom_hline(yintercept = 0, color = "red", linetype = "dashed")+
+  scale_color_viridis()+
+  theme_minimal()+
+  facet_wrap(~year, ncol = 2)
+```
+There does not seem to be an obvious relationship between depth and residuals. 
 
 ## Root Mean Square Error (RMSE)
 
