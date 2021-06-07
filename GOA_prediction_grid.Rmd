@@ -1,0 +1,166 @@
+---
+title: "Prediction grid (lat, lon, depth)"
+author: "Alberto Rovellini"
+date: "5/31/2021"
+output: 
+  html_document:
+    code_folding: hide
+    toc: true
+    toc_float: true
+---
+
+This document builds a prediction grid to use for biomass prediction by sdmTMB. This prediction grid at the moment only contains lat, lon, and depth. Later on we can use this grid with a buffer around each point to interpolate with ROMS data for the summer months, if we want the environmental covariates as predictors. 
+
+How large a grid is intractable? Puget Sound model uses an extrapolation grid of 5x5 km. That does not sound appropriate to our case given that all that it gets lost later on with averaging. Do some experimenting (10 km?).
+
+Workflow / logic:
+
+1. Read in Atlantis BGM.
+2. Develop grid of points that overlays with the model geometry.
+3. Read in a depth raster (ETOPO if that is what we used for the geometry).
+4. Intersect points and depth to have depth at each point.
+5. Done.
+
+The grid we calculate this way will then be used for prediction, so we will have predictions for the biomass index at each of the grid points. Then we will have to assign each to a box, so we need to keep some ID for which box each point sits in. 
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+library(ggplot2)
+library(tidyverse)
+library(sdmTMB)
+library(sf)
+library(here)
+library(rbgm)
+library(viridis)
+library(raster)
+```
+
+Read in BGM.
+```{r, fig.width = 8, fig.height = 5}
+atlantis_bgm <- read_bgm("data/bgm/GOA_WGS84_V4_final.bgm")
+#Atlantis geometry as an sf shapefile
+atlantis_sf <- atlantis_bgm %>% box_sf()
+ggplot(atlantis_sf)+
+  geom_sf(aes(fill=box_id))+
+  theme_minimal()+
+  scale_fill_viridis()#+
+  #geom_sf_label(aes(label = box_id))
+# plot(atlantis_sf['box_id'])
+glimpse(atlantis_sf)
+```
+
+# Build grid
+
+We will need to take island boxes out of this. 
+```{r}
+goa_grid <- st_make_grid(atlantis_sf, 
+                         #n = c(100, 30), 
+                         cellsize = 10000, # assuming we have eastings and northings, 10km will be 10000, and so on
+                         what = "centers") 
+```
+
+View
+```{r, fig.width = 12, fig.height = 8}
+ggplot(atlantis_sf)+
+  geom_sf(aes(fill=NULL))+
+  geom_sf(data = goa_grid, size = .1)+
+  theme_minimal()
+```
+
+Now reduce this to the relevant model domain, excluding the islands. 
+```{r}
+atlantis_mask <- atlantis_sf %>% filter(botz<0) # get islands
+
+prediction_grid <- st_intersection(goa_grid, atlantis_mask) 
+
+grid_coords <- do.call(rbind, st_geometry(prediction_grid)) %>% 
+    as_tibble() %>% setNames(c("x","y")) 
+
+prediction_grid <- grid_coords %>% st_as_sf(coords = c("x", "y"), crs = atlantis_bgm$extra$projection)
+```
+Note that using "st_intersect" seems to order the polygons from 1 and onwards, instead of accounting for box_id as contained in the BGM file. So not a viable approach.
+
+__NOTE__: Picking a certain cell size (e.g. 10 km) may mean that there could be boxes with no points (the very small or narrow ones). We may need something fancier that ensures a minimum number of points to be in each box - or else we will have prediction grids of intractable size (who knows if even 10 km is too much).
+View
+```{r, fig.width = 12, fig.height = 8}
+ggplot(atlantis_sf)+
+  geom_sf(aes(fill=NULL))+
+  geom_sf(data = prediction_grid, size = .1)+
+  theme_minimal()
+```
+
+# Depth
+
+Read in a depth raster from [ETOPO](https://www.ngdc.noaa.gov/mgg/global/relief/ETOPO1/data/bedrock/grid_registered/georeferenced_tiff/). 
+
+The ETOPO raster comes in WGS 84. Reprojecting the Atlantis grid to WGS 84 seems to be a lot easier than the other way around. Eventually it will all need to be in Atlantis projection though (including the RACE data - how does that play into it?)
+
+```{r}
+etopo <- raster("data/ETOPO1_Bed_g_geotiff.tif", crs = "+proj=longlat +datum=WGS84") # need to specify projection here
+
+atlantis_sf1 <- atlantis_sf %>% st_transform(crs = "+proj=longlat +datum=WGS84") # reproject Atlantis geometry to WGS 84
+
+etopo_goa <- crop(etopo, extent(atlantis_sf1)) # crop the raster to the extent of the Atlantis geometry
+```
+
+Now sample depth at the points frome the prediction grid, which also needs to be reprojected.
+```{r}
+depths <- extract(etopo_goa, prediction_grid) # it will handle the reprojection to the raster CRS
+
+prediction_grid$depth <- depths
+```
+
+View
+```{r}
+ggplot(atlantis_sf)+
+  geom_sf(aes(fill=NULL))+
+  geom_sf(data = prediction_grid, aes(color = depth), size = .5)+
+  scale_color_viridis()+
+  theme_minimal()
+```
+
+Seems to work. Stitch box id's (keep in mind that not all boxes will have points, especially for low spatial reso of the grid). 
+
+```{r}
+prediction_grid_depth <- prediction_grid %>% st_intersection(atlantis_sf)
+
+ggplot()+
+  geom_sf(data =  prediction_grid_depth, aes(color = .bx0))
+```
+
+How many points per box do we have? And how many boxes do not have any points?
+
+```{r}
+ggplot()+
+  geom_bar(data = prediction_grid_depth, aes(x = box_id))
+
+setdiff(atlantis_sf$box_id, levels(factor(prediction_grid_depth$box_id))) # in GOA, boxes 21 40 99 are islands
+```
+
+Even 10 km grid will leave boxes 1, 63, and 86 empty. These are tiny buffer boxes between model domain and boundary boxes.
+
+**IMPORTANT**: most data we are using for sdmTMB (e.g. RACE GAP and DFO bottom trawl data) have positive depths. Depth in the ETOPO raster is negative. Turn depths to positive here, and make extra sure when running sdmTMB routines that depth is not turned to negative by accident, or else predictions will be the wrong way around.
+```{r}
+prediction_grid_depth_final <- prediction_grid_depth %>% mutate(depth = -depth)
+```
+
+# Export
+
+Save this as a data frame, and as R data to be loaded in the other script.
+```{r}
+grid_values <- prediction_grid_depth_final %>% st_set_geometry(NULL)
+
+grid_coords <- do.call(rbind, st_geometry(prediction_grid_depth_final)) %>% 
+    as_tibble() %>% setNames(c("x", "y"))
+
+grid_frame <- cbind(grid_coords, grid_values) %>% dplyr::select(x:depth,insideX,insideY,box_id)
+
+write.csv(grid_frame, "data/prediction_grid/prediction_grid.csv", row.names = FALSE) # write a dataframe in case we need it
+
+# save as Rdata
+atlantis_grid_depth <- grid_frame
+save(atlantis_grid_depth, file = "data/prediction_grid/atlantis_grid_depth.Rdata")
+```
