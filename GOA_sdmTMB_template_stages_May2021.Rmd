@@ -13,7 +13,7 @@ output:
 
 **This document is based on Gemma's code.**
 
-This is a template for fitting sdmTMB to GOA bottom trawl data. For each species, it fits sdmTMB to life stages (juveniles or adults) to predict CPUE in number of individuals per km$^{2}$. This predicted CPUE is then scaled up to box area in Atlantis, to get numbers of individuals per box and proportion of the total by box, which is what we need to initialise Atlantis. This same code will be run for biomass pool species too, except for those we will not split inot juveniles and adults, and we will use CPUE in biomass.
+This is a template for fitting sdmTMB to GOA bottom trawl data. For each species, it fits sdmTMB to life stages (juveniles or adults) to predict CPUE in kg per km$^{2}$. This predicted CPUE is then scaled up to box area in Atlantis, to get biomass per box and proportion of the total by box, which is what we need to initialise Atlantis. This same code will be run for biomass pool species too, except for those we will not split inot juveniles and adults.
 
 This workflow does not include British Columbia: biomasses and/or numbers of individuals for the Atlantis boxes in the Canadian part of the model will be estimated separately by using this code, with some adjustments, on DFO groundfish bottom trawl data. 
 
@@ -87,7 +87,7 @@ load("data/goa_coast.Rdata")
 coast_sf <- st_as_sf(coast) # turn coast to sf
 
 ggplot()+
-  geom_point(data = race_data, aes(lon, lat, colour = log1p(num_km2)), size = 1.5)+
+  geom_point(data = race_data, aes(lon, lat, colour = log1p(biom_kgkm2)), size = 1.5)+
   scale_colour_viridis_c()+
   geom_polygon(data = coast, aes(x = long, y = lat, group = group), colour = "black", fill = "grey80")+
   theme_minimal()+
@@ -95,11 +95,11 @@ ggplot()+
   labs(title = paste(race_data$name,"CPUE from GOA bottom trawl survey - stage:", race_data$stage, sep = " "))
 ```
 
-Take a quick look at time series of total numbers CPUE from raw data
+Take a quick look at time series of total CPUE from raw data
 ```{r}
-num_year <- race_data %>% group_by(year) %>% summarise(num = sum(log1p(num_km2)))
+biom_year <- race_data %>% group_by(year) %>% summarise(biom = sum(log1p(biom_kgkm2)))
 
-ggplot(num_year, aes(year, log(num)))+
+ggplot(biom_year, aes(year, log(biom)))+
   geom_point()+
   geom_path()+
   theme_minimal()+
@@ -149,18 +149,18 @@ race_spde <- make_mesh(race_data, c("lon", "lat"), n_knots = 450) # usually 450
 plot(race_spde)
 ```
 
-Check out the distribution of the number of individuals response variable.
+Check out the distribution of the biomass response variable.
 ```{r}
-hist(race_data$num_km2, breaks = 30)
+hist(race_data$biom_kgkm2, breaks = 30)
 ```
 
 ```{r}
-hist(log1p(race_data$num_km2), breaks = 30)
+hist(log1p(race_data$biom_kgkm2), breaks = 30)
 ```
 
 Proportion of zeroes in percentage.
 ```{r}
-length(which(race_data$num_km2 == 0))/nrow(race_data)*100
+length(which(race_data$biom_kgkm2 == 0))/nrow(race_data)*100
 ```
 
 ## Space, time, and depth model.
@@ -173,7 +173,7 @@ Try running a model with smooth term for depth. Using 5 knots for the smooth - b
 start.time <- Sys.time()
 m_depth <- sdmTMB(
   data = race_data, 
-  formula = num_km2 ~ 0 + s(depth, k = 5) + as.factor(year), # predicting numbers - we will need numbers for Atlantis
+  formula = biom_kgkm2 ~ 0 + s(depth, k = 5) + as.factor(year), 
   time = "year", 
   spde = race_spde, 
   reml = TRUE,
@@ -296,7 +296,7 @@ ggplot()+
   geom_sf(data = subset(atlantis_boxes, box_id < 92), aes(fill = NULL))+
   geom_sf(data = subset(atlantis_grid_sf, box_id < 92), aes(color=log1p(estimates)))+ # taking the log for visualisation
   geom_sf(data = coast_sf, colour = "black", fill = "grey80")+
-  scale_color_viridis(name = expression(paste("Log(CPUE) num ", km^-2)))+
+  scale_color_viridis(name = expression(paste("Log(CPUE) kg ", km^-2)))+
   theme_minimal()+
   labs(title = paste(race_data$name,"predicted CPUE - stage:", race_data$stage, sep = " "))+
   facet_wrap(~year, ncol = 2)
@@ -318,7 +318,7 @@ predictions_by_box <- predictions_by_box %>% rowwise() %>% mutate(mean_estimates
 
 ggplot()+
   geom_sf(data = predictions_by_box[predictions_by_box$box_id<92,], aes(fill = log1p(mean_estimates)))+ # taking the log for visualisation
-  scale_fill_viridis(name = expression(paste("Log(CPUE) num ", km^-2)))+
+  scale_fill_viridis(name = expression(paste("Log(CPUE) kg ", km^-2)))+
   theme_minimal()+
   geom_sf(data = coast_sf, colour = "black", fill = "grey80")+
   facet_wrap(~year, ncol = 2)+
@@ -328,8 +328,8 @@ ggplot()+
 Plot the raw data again for comparison.
 ```{r, fig.width = 12, fig.height = 18}
 ggplot()+
-  geom_point(data = race_data, aes(lon, lat, colour = log1p(num_km2)), size = 1.5, alpha = .5)+ # taking the log for visualisation
-  scale_colour_viridis_c(name = expression(paste("Log(CPUE) num ", km^-2)))+
+  geom_point(data = race_data, aes(lon, lat, colour = log1p(biom_kgkm2)), size = 1.5, alpha = .5)+ # taking the log for visualisation
+  scale_colour_viridis_c(name = expression(paste("Log(CPUE) kg ", km^-2)))+
   geom_polygon(data = coast, aes(x = long, y = lat, group = group), colour = "black", fill = "grey80")+
   theme_minimal()+
   facet_wrap(~year, ncol = 2)+
@@ -338,7 +338,7 @@ ggplot()+
 
 Have a look at CPUE by depth. This is rough and quick, keep in mind that most tows happen shallower than 300 m, so the sample is not equal between depths.
 ```{r}
-ggplot(data = race_data, aes(x = depth, y = log1p(num_km2), color = log1p(biom_kgkm2)))+
+ggplot(data = race_data, aes(x = depth, y = log1p(biom_kgkm2), color = log1p(num_km2)))+
   scale_color_viridis()+
   geom_point()+
   theme_minimal()+
@@ -347,7 +347,7 @@ ggplot(data = race_data, aes(x = depth, y = log1p(num_km2), color = log1p(biom_k
 
 Plot data and predictions distributions. These are the data.
 ```{r}
-ggplot(data = race_data, aes(x = log1p(num_km2)))+
+ggplot(data = race_data, aes(x = log1p(biom_kgkm2)))+
   geom_histogram(colour = "black", fill = 'grey80', bins = 30)+
   theme_minimal()
 ```
@@ -362,16 +362,41 @@ ggplot(data = atlantis_grid, aes(x = log1p(estimates)))+
 # Mean predictions for the study period
 
 Now calculate means of the predictions for the entire study period. Doing it by taking 1984-2019 averages for each Atlantis box.
-```{r, , fig.width = 10, fig.height = 5}
-means_all_years <- predictions_by_box %>% group_by(box_id, area, boundary) %>% summarise(all_years_numkm2 = mean(mean_estimates)) %>% ungroup()
+```{r, fig.width = 10, fig.height = 5}
+means_all_years <- predictions_by_box %>% group_by(box_id, area, boundary) %>% summarise(all_years_kgkm2 = mean(mean_estimates)) %>% ungroup()
 
 ggplot()+
-  geom_sf(data = means_all_years[means_all_years$box_id < 92,], aes(fill = log1p(all_years_numkm2)))+ # log for visualisation
-  scale_fill_viridis(name = expression(paste("Log(CPUE) num ", km^-2)))+
+  geom_sf(data = means_all_years[means_all_years$box_id < 92,], aes(fill = log1p(all_years_kgkm2)))+ # log for visualisation
+  scale_fill_viridis(name = expression(paste("Log(CPUE) kg ", km^-2)))+
   geom_sf(data = coast_sf, colour = "black", fill = "grey80")+
   theme_minimal()+
   labs(title = paste(race_data$name, "mean predicted CPUE by Atlantis box (1984-2019) - stage:", race_data$stage, sep = " "))
 ```
+
+Let's have a look at the variance per box over all years. We use the coefficient of variation, because CPUE varies widely between boxes.
+```{r, fig.width = 10, fig.height = 5}
+cv_all_years <- predictions_by_box %>% group_by(box_id, area, boundary) %>% summarise(cv = sd(mean_estimates)/mean(mean_estimates)) %>% ungroup()
+
+ggplot()+
+  geom_sf(data = cv_all_years[cv_all_years$box_id < 92,], aes(fill = cv))+ # log for visualisation
+  scale_fill_viridis(name = "CV of CPUE")+
+  geom_sf(data = coast_sf, colour = "black", fill = "grey80")+
+  theme_minimal()+
+  labs(title = paste(race_data$name, "CV of predicted CPUE by Atlantis box (1984-2019) - stage:", race_data$stage, sep = " "))
+```
+A couple of boxes have a pretty high CV. This will change between species. 
+
+Let's see how estimated CPUE changes over time, per box.
+```{r, fig.width = 12, fig.height = 18}
+predictions_by_box %>% 
+  ggplot(aes(x = year,y = mean_estimates))+
+  geom_point()+
+  geom_line()+
+  theme_minimal()+
+  facet_wrap(~.bx0, scales = "free", ncol = 8)
+```
+
+Considerable variation over time. It may be worth assigning more weight to earlier years, although the distributions are supposed to be "generally representative" throughout the simulation, at least when it comes to S1-S4.
 
 # Model skill
 
@@ -399,12 +424,12 @@ race_corr <- race_data %>% left_join(race_grid, by = c("year", "lat", "lon"))
 ## Observed versus predicted
 
 ```{r}
-paste0("Pearson's coef observations vs predictions: ", cor(race_corr$num_km2, race_corr$predictions, use = "everything", method = "pearson"))
+paste0("Pearson's coef observations vs predictions: ", cor(race_corr$biom_kgkm2, race_corr$predictions, use = "everything", method = "pearson"))
 ```
 
 Plot.
 ```{r, fig.width = 12, fig.height = 12}
-ggplot(race_corr, aes(x = log1p(num_km2), y = log1p(predictions)))+ # log for visualisation
+ggplot(race_corr, aes(x = log1p(biom_kgkm2), y = log1p(predictions)))+ # log for visualisation
   geom_point(aes(color = depth.y))+
   scale_color_viridis()+
   geom_abline(intercept = 0, slope = 1)+
@@ -417,7 +442,7 @@ These models often underpredict zeroes, i.e. they predict a catch where there wa
 
 Plot zero catch from the data and the relative predictions. Turn to sf for plotting.
 ```{r, fig.width = 12, fig.height = 18}
-race_corr %>% filter(num_km2 == 0) %>%
+race_corr %>% filter(biom_kgkm2 == 0) %>%
   st_as_sf(coords = c(x = "lon", y = "lat"), crs = 4326) %>%
   ggplot()+
   geom_sf(aes(color = log1p(predictions)))+
@@ -432,9 +457,8 @@ For adult ATF with 450 knots and k = 5 in the depth spline, it seems that non-ze
 What about the relationship between model residuals and depth?
 ```{r, fig.width = 12, fig.height=16}
 race_data %>%
-  #filter(num_km2 == 0) %>%
   ggplot()+
-  geom_point(aes(x = depth, y = resids, color = log1p(num_km2)))+
+  geom_point(aes(x = depth, y = resids, color = log1p(biom_kgkm2)))+
   geom_hline(yintercept = 0, color = "red", linetype = "dashed")+
   scale_color_viridis()+
   theme_minimal()+
@@ -446,27 +470,41 @@ There does not seem to be an obvious relationship between depth and residuals.
 
 Calculate RMSE between predicted and observed values.
 ```{r}
-paste("RMSE:", sqrt(mean(race_corr$predictions - race_corr$num_km2)^2), " num km-2", sep = " ") ### traditional rmse metric, in units num km2
+paste("RMSE:", sqrt(sum((race_corr$predictions - race_corr$biom_kgkm2)^2)/nrow(race_corr)), " num km-2", sep = " ") ### traditional rmse metric, in units kg km2
 ```
 
 Normalised RMSE. 
 ```{r}
-rmse_cv <- sqrt(mean((race_corr$predictions - race_corr$num_km2)^2))/(max(race_corr$num_km2)-min(race_corr$num_km2))*100 #### normalised rmse, expressed as a % of the range of observed biomass values, sort of approximates a coefficient of variation 
+rmse_cv <- sqrt(sum((race_corr$predictions - race_corr$biom_kgkm2)^2)/nrow(race_corr))/(max(race_corr$biom_kgkm2)-min(race_corr$biom_kgkm2))*100 #### normalised rmse, expressed as a % of the range of observed biomass values, sort of approximates a coefficient of variation 
 paste("Normalised RMSE:", paste0(rmse_cv, "%"), sep = " ")
 ```
 
-# Total numbers and numbers per box
+# Total biomass and biomass per box
 
-The current estimated CPUE is in num km$^{-2}$. So, just we just turn that into fish per box (biomass pools groups will follow the same workflow except the model will predict biomass CPUE). Remember that the area is in m$^2$ for the boxes, so need to divide by 1,000,000.
+The current estimated CPUE is in kg km$^{-2}$. So, just we just turn that into biomass per box. Remember that the area is in m$^2$ for the boxes, so need to divide by 1,000,000.
 
 Do this separate for Alaska and Canada, since we are using different data. Total biomass to calculate only for the respective regions, as well as box biomass. Proportional biomass (S1-S4), instead, makes sense only for the entire model domain, so that will be in another script.
 ```{r}
-means_all_years <- means_all_years %>% mutate(numbers = all_years_numkm2*area*1e-06)
+means_all_years <- means_all_years %>% mutate(biomass = all_years_kgkm2*area*1e-06)
 
 means_alaska <- means_all_years %>% filter(box_id<92)
 ```
 
 ```{r}
-means_alaska %>% select(box_id, all_years_numkm2, numbers) %>% st_set_geometry(NULL) %>% kable(align = 'lccc', format = "markdown", 
-      col.names = c("Box", "CPUE (num km-2)", "Number of individuals"))
+means_alaska %>% select(box_id, all_years_kgkm2, biomass) %>% st_set_geometry(NULL) %>% kable(align = 'lccc', format = "markdown", 
+      col.names = c("Box", "CPUE (kg km-2)", "Biomass"))
+```
+
+# Validation metrics
+
+Let's produce a table that includes: convergence metrics; Pearson's correlation coefficient for predicted vs observed; RMSE; and normalised RMSE. 
+
+```{r}
+data.frame(m_depth$model$convergence, # convergence
+           m_depth$model$message, # more convergence
+           cor(race_corr$biom_kgkm2, race_corr$predictions, use = "everything", method = "pearson"), # correlation
+           sqrt(sum((race_corr$predictions - race_corr$biom_kgkm2)^2)/nrow(race_corr)),# RMSE
+           sqrt(sum((race_corr$predictions - race_corr$biom_kgkm2)^2)/nrow(race_corr))/(max(race_corr$biom_kgkm2)-min(race_corr$biom_kgkm2))*100 # NRMSE
+) %>% set_names(c("Convergence","Message","Pearson's correlation","RMSE","NRMSE(%)"))
+
 ```
