@@ -1,0 +1,129 @@
+---
+title: "Invertebrate catch to CPUE from AKFIN"
+author: "Alberto Rovellini"
+date: "6/20/2021"
+output: 
+  html_document:
+    code_folding: hide
+    toc: true
+    toc_float: true
+---
+
+This document reads in Catch data from AKFIN Answers for all species in the GOA, and calculates the CPUE for each species in each haul based on the Haul Description data set from AKFIN. The CPUE data we calculate this way will be used to run sdmTMB on invertebrate groups. It will be a large data set. 
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r, include=FALSE}
+library(tidyverse)
+library(kableExtra)
+library(sf)
+library(raster)
+library(viridis)
+library(maps)
+library(mapdata)
+```
+
+```{r}
+select <- dplyr::select
+```
+
+Read in Atlantis groups, the RACE species list, and map them to one another.
+```{r}
+atlantis_groups <- read.csv("C:/Users/arove/Documents/GOA/SDM/sdmTMB_forGemma_May2021/catch_to_CPUE_AKFIN/GOA_Groups.csv", fileEncoding = "UTF-8-BOM")
+atlantis_groups <- atlantis_groups %>% select(Code, Name, LongName)
+
+race_species_all <- read.csv("C:/Users/arove/Documents/GOA/SDM/sdmTMB_forGemma_May2021/catch_to_CPUE_AKFIN/RACE_species_goa_Atlantis.csv", fileEncoding = "UTF-8-BOM")
+race_species <- race_species_all[!is.na(race_species_all$Atlantis.group),] # drop NAs (egg cases, debris, etc.)
+race_species <- race_species %>% select(Atlantis.group:Scientific.Name)
+
+race_species <- race_species %>% left_join(atlantis_groups, by = c("Atlantis.group" = "Code"))
+```
+
+Read in AKFIN "Catch" data.
+```{r}
+catch <- read.csv("C:/Users/arove/Documents/GOA/SDM/sdmTMB_forGemma_May2021/catch_to_CPUE_AKFIN/race_catch_by_haul.csv", skip = 5)
+
+# how many species do we have catch data for, from AKFIN?
+length(levels(factor(catch$Species.Code))) # 1531
+
+# and how many hauls?
+length(levels(factor(catch$Haul.Join.ID))) # 12288
+```
+
+The Catch data does not include information about the effort. So let's use the "Haul Description" data set to obtain haul information. The column "Satisfactory Performance" will be used to subset these to the hauls that can be used.
+```{r}
+hauls_tmp <- read.csv("C:/Users/arove/Documents/GOA/SDM/sdmTMB_forGemma_May2021/catch_to_CPUE_AKFIN/Haul Descriptions.csv", fileEncoding = "UTF-8-BOM")
+hauls <- hauls_tmp %>% 
+  select(Haul.Join.ID, Distance.Fished..km., Net.Width..m., Satisfactory.Performance) %>%
+  filter(Satisfactory.Performance == "Y") %>% 
+  mutate(My.effort.km2 = Distance.Fished..km.* Net.Width..m. * 0.001) %>%
+  select(Haul.Join.ID, My.effort.km2)
+```
+
+Now join the haul data to the catch data by Haul.Join.ID. Because now the haul data only contains the hauls we can use for effort/CPUE, base the join on that. Drop columns as appropriate. Then calculate new CPUE for weight and numbers from this. 
+```{r}
+catch_short <- catch %>% select(Year, Haul.Join.ID, Catch.Join.ID, Ending.Latitude..dd., Ending.Longitude..dd., Bottom.Depth, Species.Code, Weight..kg., Number.of.Fish)
+
+catch_all <- hauls %>% left_join(catch_short) %>% mutate(cpue.kg.km2 = Weight..kg./My.effort.km2, cpue.ind.km2 = Number.of.Fish/My.effort.km2) %>%
+  select(Year, Haul.Join.ID, Catch.Join.ID, Ending.Latitude..dd., Ending.Longitude..dd., Bottom.Depth, Species.Code, cpue.kg.km2, cpue.ind.km2)
+```
+
+However, some hauls in the haul data do not appear in the catch data. Discard those hauls that do not have information in the catch data. In addition, some records have no CPUE, biomass or numbers. Discard those too.
+```{r}
+catch_all <- catch_all %>% filter(!is.na(Ending.Latitude..dd.) & !is.na(cpue.kg.km2))
+```
+
+Map species to Atlantis groups.
+```{r}
+# rename column names for consistency with Kirstin's code
+
+catch_all <- catch_all %>% set_names(c("YEAR","HAULJOIN","CATCH","LAT","LON","DEPTHR","CODE","BIOM_KGKM2","NUM_KM2"))
+
+# add a column with Atlantis group code and name
+key <- race_species %>% select(Species.Code, Atlantis.group, Name) %>% set_names(c("CODE","ATLANTIS_GROUP","CN"))
+catch_all <- catch_all %>% left_join(key, by = "CODE")
+
+catch_all <- catch_all %>% filter(!is.na(CN)) # discard those cases that do not map to Atlantis groups, for now
+```
+
+Aggregate species to groups.
+```{r}
+# sum species to atlantis groups (e.g., catch of different sponge species in the same haul goes toward the "Sponge" group in Atlantis)
+cpue <- catch_all %>% group_by(YEAR,HAULJOIN,LAT,LON,DEPTHR,ATLANTIS_GROUP,CN) %>% summarise(BIOM_KGKM2 = sum(BIOM_KGKM2), NUM_KM2 = sum(NUM_KM2)) %>% ungroup()
+```
+
+Have a look at the data.
+```{r, fig.width = 12, fig.height = 10}
+ggplot(data = cpue, aes(x = YEAR))+
+  geom_bar(stat = "count")+
+  theme_minimal()+
+  facet_wrap(~CN, scales = "free_y", ncol = 5)+
+  labs(title = "Hauls with non-zero catch")
+```
+
+And spatially.
+```{r, fig.width = 10, fig.height=16}
+cpue_sf <- cpue %>% st_as_sf(coords = c(x = "LON", y = "LAT"), crs = "WGS84")
+race_extent <- st_bbox(cpue_sf) # set the extent of the race data
+
+coast <- map("worldHires", regions = c("Canada", "USA"), plot = FALSE, fill = TRUE)
+coast <- coast %>% st_as_sf()
+
+group <- "Pollock"
+
+ggplot()+
+  geom_sf(data = cpue_sf[cpue_sf$CN == group,], aes(color = log1p(BIOM_KGKM2)))+
+  geom_sf(data = coast)+
+  coord_sf(xlim = c(race_extent$xmin,race_extent$xmax),ylim = c(race_extent$ymin,race_extent$ymax))+
+  scale_color_viridis()+
+  theme_minimal()+
+  facet_wrap(~YEAR, ncol = 2)+
+  labs(title = "Catch by haul")
+```
+See text to RACE.Rmd for thoughts about sample sizes of each group and what we should use (those refer to individuals, so for groups like corals and sponges there are fewer data points, but the main ideas hold).
+
+Save invertebrate CPUE to RData, to open in sdmTMB. We probably forgot about some variables, but we will see.
+```{r}
+save(cpue, file = "C:/Users/arove/Documents/GOA/SDM/sdmTMB_forGemma_May2021/catch_to_CPUE_AKFIN/cpue.Rdata")
+```
