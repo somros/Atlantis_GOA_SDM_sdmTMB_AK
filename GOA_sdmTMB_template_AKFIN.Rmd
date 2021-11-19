@@ -1,7 +1,7 @@
 ---
 title: "Atlantis biomass distributions with sdmTMB - lat, lon, depth"
 author: "Alberto Rovellini"
-date: "6/21/2021"
+date: "11/15/2021"
 output:
   html_document:
     code_folding: hide
@@ -53,8 +53,8 @@ fields <- c("YEAR",
             "DEPTHR", 
             "ATLANTIS_GROUP", 
             "CN",
-            "BIOM_KGKM2", 
-            "NUM_KM2")
+            "STAGE",
+            "BIOM_KGKM2")
   
 race_data <- race_data %>% select(all_of(fields)) %>% set_names(c(
   "year",
@@ -64,8 +64,8 @@ race_data <- race_data %>% select(all_of(fields)) %>% set_names(c(
   "depth",
   "species_code",
   "name",
-  "biom_kgkm2",
-  "num_km2"))
+  "stage",
+  "biom_kgkm2"))
 ```
 
 Take a quick look at the data spatially.
@@ -110,8 +110,8 @@ zero_catches <- hauls %>% filter(Haul.Join.ID %in% zero_hauls) %>%
   select(Year, Haul.Join.ID, Ending.Latitude..dd., Ending.Longitude..dd., Bottom.Depth..m.) %>% 
   mutate(species_code = rep(NA, length(Year)),
          name = rep(NA, length(Year)),
-         biom_kgkm2 = rep(0, length(Year)),
-         num_km2 = rep(0, length(Year))) %>%
+         stage = rep(NA, length(Year)),
+         biom_kgkm2 = rep(0, length(Year))) %>%
   set_names(names(race_data))
 
 # attach by row to race_data
@@ -185,8 +185,6 @@ m_depth <- sdmTMB(
   spatial_only = FALSE,
   silent = FALSE,
   control = sdmTMBcontrol(),
-  # nlminb_loops = 3,
-  # newton_steps = 10,
   family = tweedie(link = "log"))
 end.time <- Sys.time()
 time.taken_m_depth <- end.time - start.time
@@ -195,7 +193,7 @@ time.taken_m_depth
 
 Rerun with extra optimization steps in case of gradient > 0.001. 
 ```{r, results = FALSE}
-if(max(m_depth$gradients)>0.001){
+if(abs(max(m_depth$gradients))>0.001){
   m_depth <- sdmTMB(
   data = race_data, 
   formula = biom_kgkm2 ~ 0 + s(depth, k = 5) + as.factor(year), 
@@ -206,9 +204,7 @@ if(max(m_depth$gradients)>0.001){
   spatial_trend = FALSE, 
   spatial_only = FALSE,
   silent = FALSE,
-  control = sdmTMBcontrol(),
-  nlminb_loops = 1,
-  newton_steps = 3,
+  control = sdmTMBcontrol(nlminb_loops = 1, newton_steps = 3),
   family = tweedie(link = "log"))
 end.time <- Sys.time()
 }
@@ -360,7 +356,7 @@ ggplot()+
 
 Have a look at CPUE by depth. This is rough and quick, keep in mind that most tows happen shallower than 300 m, so the sample is not equal between depths.
 ```{r}
-ggplot(data = race_data, aes(x = depth, y = log1p(biom_kgkm2), color = log1p(num_km2)))+
+ggplot(data = race_data, aes(x = depth, y = log1p(biom_kgkm2)))+
   scale_color_viridis()+
   geom_point()+
   theme_minimal()+
@@ -522,7 +518,7 @@ Write out a .csv.
 ```{r}
 out <- means_alaska %>% st_set_geometry(NULL)
 
-write.csv(x = out, file = paste0("C:/Users/arove/Documents/GOA/SDM/sdmTMB_forGemma_May2021/output/cpue_tables/",race_data$name[1],"_AFSC.csv"), row.names = FALSE)
+write.csv(x = out, file = paste0("C:/Users/Alberto Rovellini/Documents/GOA/SDM/sdmTMB_stages/output/cpue_tables/",race_data$name[1],race_data$stage[1],"_AFSC.csv"), row.names = FALSE)
 ```
 
 # Validation metrics
@@ -530,13 +526,17 @@ write.csv(x = out, file = paste0("C:/Users/arove/Documents/GOA/SDM/sdmTMB_forGem
 Let's produce a table that includes: convergence metrics; Pearson's correlation coefficient for predicted vs observed; RMSE; and normalised RMSE. 
 
 ```{r}
-data.frame(m_depth$model$convergence, # convergence
-           m_depth$model$message, # more convergence
-           max(m_depth$gradients), # max gradient
-           m_depth$tmb_obj$report()$range, # practical range
-           cor(race_corr$biom_kgkm2, race_corr$predictions, use = "everything", method = "pearson"), # correlation
-           sqrt(sum((race_corr$predictions - race_corr$biom_kgkm2)^2)/nrow(race_corr)),# RMSE
-           sqrt(sum((race_corr$predictions - race_corr$biom_kgkm2)^2)/nrow(race_corr))/(max(race_corr$biom_kgkm2)-min(race_corr$biom_kgkm2))*100 # NRMSE
-) %>% set_names(c("Convergence","Message","Max gradient","Practical range (km)","Pearson's correlation","RMSE","NRMSE(%)"))
+val <- data.frame(race_data$name[1], # group
+                  m_depth$model$convergence, # convergence
+                  m_depth$model$message, # more convergence
+                  max(m_depth$gradients), # max gradient
+                  m_depth$tmb_obj$report()$range, # practical range
+                  cor(race_corr$biom_kgkm2, race_corr$predictions, use = "everything", method = "pearson"), # correlation
+                  sqrt(sum((race_corr$predictions - race_corr$biom_kgkm2)^2)/nrow(race_corr)),# RMSE
+                  sqrt(sum((race_corr$predictions - race_corr$biom_kgkm2)^2)/nrow(race_corr))/(max(race_corr$biom_kgkm2)-min(race_corr$biom_kgkm2))*100 # NRMSE
+) %>% set_names(c("Group","Convergence","Message","Max gradient","Practical range (km)","Pearson's correlation","RMSE","NRMSE(%)"))
 
+val
+
+write.csv(x = val, file = paste0("C:/Users/Alberto Rovellini/Documents/GOA/SDM/sdmTMB_stages/output/validation_tables/",race_data$name[1],race_data$stage[1],"_AFSC.csv"), row.names = FALSE)
 ```

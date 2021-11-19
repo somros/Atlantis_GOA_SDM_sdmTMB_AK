@@ -22,7 +22,7 @@ coast <- map("worldHires", regions = c("Canada", "USA"), plot = FALSE, fill = TR
 coast <- coast %>% st_as_sf() 
 
 # haul info
-load("data/hauls.Rdata") # as accessible on AKFIN Answers with no further modifications
+hauls <- read.csv("catch_to_CPUE_AKFIN/Haul Descriptions.csv", fileEncoding = "UTF-8-BOM") # as accessible on AKFIN Answers with no further modifications
 
 # atlantis bgm
 atlantis_bgm <- read_bgm("data/GOA_WGS84_V4_final.bgm")
@@ -35,22 +35,22 @@ atlantis_coords <- atlantis_grid_depth %>% st_as_sf(coords = c("x", "y"), crs = 
 atlantis_grid_template <- cbind(atlantis_grid_depth, do.call(rbind, st_geometry(atlantis_coords)) %>%
                          as_tibble() %>% setNames(c("lon","lat")))
 #######################################################################################
-
 # load RACE data
 
-load("catch_to_cpue_AKFIN/cpue.Rdata")
+load("catch_to_cpue_AKFIN/cpue_by_stage.Rdata")
 
 # loop over groups
-all_groups <- cpue %>% select(CN) %>% distinct() %>% pull()
+all_groups <- cpue %>% select(CN,STAGE) %>% distinct()
 
-cpue_knitter <- function(this_group){
-  race_data <- cpue %>% filter(CN == this_group)
+cpue_knitter <- function(this_group,this_stage){
+  race_data <- cpue %>% filter(CN == this_group & STAGE==this_stage)
   
   rmarkdown::render(
     'GOA_sdmTMB_template_AKFIN.Rmd', 
-    output_file = paste0("output/", this_group, "_", cutoff, '.html')
+    output_file = paste0("output/", this_group, this_stage, "_", cutoff, '.html')
   )
 }
 
 # run for all groups, start for next group if the model will not converge
-purrr::map(all_groups, possibly(cpue_knitter, NA))
+purrr::map2(all_groups$CN, all_groups$STAGE, possibly(cpue_knitter, NA))
+
