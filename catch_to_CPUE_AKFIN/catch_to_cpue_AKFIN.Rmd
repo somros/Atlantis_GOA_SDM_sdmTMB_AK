@@ -158,7 +158,7 @@ lw_key <- sizecomp_species %>%
   mutate(lw_bayes = purrr::pmap(list(this_genus=Genus,this_species=Species),possibly(apply_Froese,NA))) %>%
   unnest_wider(col = c(lw_bayes)) %>%
   set_names(c('Genus','Species','Log10a','b')) %>%
-  mutate(a=10^Log10a) %>%
+  mutate(a=10^Log10a) %>% # because the models return estimates for log10a, not a
   select(-Log10a)
 ```
 

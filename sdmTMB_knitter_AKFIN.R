@@ -12,7 +12,6 @@ library(mapdata)
 
 # setup
 select <- dplyr::select
-# knots <- 450 # n of knots for the SPDE mesh
 cutoff <- 20 # 20 spatial units - 20 km in our case because of the transformtion
 
 ## read in objects we will need#########################################################
@@ -27,7 +26,7 @@ hauls <- read.csv("catch_to_CPUE_AKFIN/Haul Descriptions.csv", fileEncoding = "U
 # atlantis bgm
 atlantis_bgm <- read_bgm("data/GOA_WGS84_V4_final.bgm")
 
-# prediciton grid, make the depth positive for consistency with RACE data. Also append coordinates, and add time dimension
+# prediction grid, make the depth positive for consistency with RACE data. Also append coordinates, and add time dimension
 load("data/atlantis_grid_depth.Rdata")
 atlantis_coords <- atlantis_grid_depth %>% st_as_sf(coords = c("x", "y"), crs = atlantis_bgm$extra$projection) %>%
   st_transform(crs = "+proj=longlat +datum=WGS84") %>% dplyr::select(geometry)
@@ -53,4 +52,3 @@ cpue_knitter <- function(this_group,this_stage){
 
 # run for all groups, start for next group if the model will not converge
 purrr::map2(all_groups$CN, all_groups$STAGE, possibly(cpue_knitter, NA))
-
