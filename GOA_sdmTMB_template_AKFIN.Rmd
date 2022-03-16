@@ -177,7 +177,7 @@ start.time <- Sys.time()
 
 m_depth <- sdmTMB(
     data = race_data, 
-    formula = biom_kgkm2 ~ 0 + s(depth, k = 3) + as.factor(year), 
+    formula = biom_kgkm2 ~ 0 + s(depth, k = n_knots) + as.factor(year), 
     mesh = race_spde, 
     time = "year", 
     spatial = 'on',
@@ -198,7 +198,7 @@ if(abs(max(m_depth$gradients))>0.001){
   
   m_depth <- sdmTMB(
     data = race_data, 
-    formula = biom_kgkm2 ~ 0 + s(depth, k = 3) + as.factor(year), 
+    formula = biom_kgkm2 ~ 0 + s(depth, k = n_knots) + as.factor(year), 
     mesh = race_spde, 
     time = "year", 
     spatial = 'on',
@@ -212,7 +212,7 @@ if(abs(max(m_depth$gradients))>0.001){
 }
 ```
 
-Check information on model convergence. From [the nlminb help page](https://rdrr.io/r/stats/nlminb.html) we know that an integer 0 indicates succesful convergence. Additional information on convergence can be checked with m_depth\$model\$message. According to the original [PORT optimization documentation](https://web.archive.org/web/20070203144320/http://netlib.bell-labs.com/cm/cs/cstr/153.pdf), "Desirable return codes are 3, 4, 5, and sometimes 6".  
+Check information on model convergence. From [the nlminb help page](https://rdrr.io/r/stats/nlminb.html) we know that an integer 0 indicates succesful convergence. Additional information on convergence can be checked with `m_depth\$model\$message`. According to the original [PORT optimization documentation](https://web.archive.org/web/20070203144320/http://netlib.bell-labs.com/cm/cs/cstr/153.pdf), "Desirable return codes are 3, 4, 5, and sometimes 6".  
 ```{r}
 if(m_depth$model$convergence == 0){print("The model converged.")} else {print("Check convergence issue.")}
 m_depth$model$message # convergence message

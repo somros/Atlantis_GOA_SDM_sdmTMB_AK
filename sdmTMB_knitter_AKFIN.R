@@ -42,7 +42,10 @@ load("catch_to_cpue_AKFIN/cpue_by_stage.Rdata")
 all_groups <- cpue %>% select(CN,STAGE) %>% distinct()
 
 cpue_knitter <- function(this_group,this_stage){
+  
   race_data <- cpue %>% filter(CN == this_group & STAGE==this_stage)
+  
+  n_knots <- ifelse(this_group=='Flatfish_shallow',5,3) # flatfish shallow is one of the notable ones that benefit from 5 knots in AK
   
   rmarkdown::render(
     'GOA_sdmTMB_template_AKFIN.Rmd', 
